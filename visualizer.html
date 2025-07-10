@@ -6,6 +6,8 @@
     <title>Options Open Interest Visualizer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -167,51 +169,103 @@
             if (optionsChart) {
                 optionsChart.destroy();
             }
+
+            // --- NEW: Prepare annotations, including the new last price line ---
+            const annotations = {
+                callWall: {
+                    type: 'line', scaleID: 'x', value: data.call_wall_strike,
+                    borderColor: 'rgba(34, 197, 94, 0.9)', borderWidth: 3, borderDash: [6, 6],
+                    label: { content: 'Call Wall', display: true, position: 'start', backgroundColor: 'rgba(22, 163, 74, 0.9)', font: { weight: 'bold' } }
+                },
+                putWall: {
+                    type: 'line', scaleID: 'x', value: data.put_wall_strike,
+                    borderColor: 'rgba(239, 68, 68, 0.9)', borderWidth: 3, borderDash: [6, 6],
+                    label: { content: 'Put Wall', display: true, position: 'end', backgroundColor: 'rgba(220, 38, 38, 0.9)', font: { weight: 'bold' } }
+                }
+            };
+
+            if (data.last_price) {
+                annotations.lastPrice = {
+                    type: 'line',
+                    scaleID: 'x',
+                    value: data.last_price, // The value is numeric, not a label string
+                    borderColor: 'rgba(255, 255, 255, 0.7)',
+                    borderWidth: 2,
+                    label: {
+                        content: `Last: ${data.last_price.toFixed(2)}`,
+                        display: true,
+                        position: 'center',
+                        backgroundColor: 'rgba(100, 100, 100, 0.8)',
+                        font: { style: 'italic' }
+                    }
+                };
+            }
+
+
             optionsChart = new Chart(ctx, {
                 type: 'bar',
-                data: { /* ... Chart data configuration from original file ... */
+                data: {
                     labels: data.labels,
                     datasets: [
+                        // --- OI Bars ---
                         {
                             label: 'Call OI', data: data.call_oi,
-                            backgroundColor: 'rgba(22, 163, 74, 0.8)',
-                            yAxisID: 'y'
+                            backgroundColor: 'rgba(22, 163, 74, 0.7)',
+                            yAxisID: 'y',
+                            stack: 'calls' // Group for stacking
                         },
                         {
                             label: 'Put OI', data: data.put_oi,
-                            backgroundColor: 'rgba(220, 38, 38, 0.8)',
-                            yAxisID: 'y'
+                            backgroundColor: 'rgba(220, 38, 38, 0.7)',
+                            yAxisID: 'y',
+                            stack: 'puts' // Group for stacking
+                        },
+                        // --- NEW: Volume Bars ---
+                        {
+                            label: 'Call Volume', data: data.call_vol,
+                            backgroundColor: 'rgba(74, 222, 128, 0.7)', // Lighter green
+                            yAxisID: 'y',
+                            stack: 'calls' // Group for stacking
                         },
                         {
-                            label: 'Cumulative OI', data: data.cumulative_oi,
-                            type: 'line', borderColor: 'rgba(234, 179, 8, 1)',
-                            yAxisID: 'y1'
+                            label: 'Put Volume', data: data.put_vol,
+                            backgroundColor: 'rgba(248, 113, 113, 0.7)', // Lighter red
+                            yAxisID: 'y',
+                            stack: 'puts' // Group for stacking
+                        },
+                        // --- Line charts ---
+                        {
+                            label: 'Cumulative OI', data: data.cumulative_oi, type: 'line',
+                            borderColor: 'rgba(234, 179, 8, 1)', yAxisID: 'y1'
                         },
                         {
-                            label: 'Cumulative Volume', data: data.cumulative_vol,
-                            type: 'line', borderColor: 'rgba(59, 130, 246, 1)',
-                            hidden: true, yAxisID: 'y1'
+                            label: 'Cumulative Volume', data: data.cumulative_vol, type: 'line',
+                            borderColor: 'rgba(59, 130, 246, 1)', hidden: true, yAxisID: 'y1'
                         }
                     ]
                 },
-                options: { /* ... Chart options configuration from original file ... */
+                options: {
                     responsive: true, maintainAspectRatio: false,
                     plugins: {
-                        title: { display: true, text: `${ticker} Open Interest Profile | Exp: ${expiry}`, font: { size: 20 }, color: '#E5E7EB' },
+                        title: { display: true, text: `${ticker} Open Interest & Volume Profile | Exp: ${expiry}`, font: { size: 20 }, color: '#E5E7EB' },
                         legend: { labels: { color: '#D1D5DB' } },
                         tooltip: {
                             mode: 'index', intersect: false,
                             callbacks: { label: (c) => `${c.dataset.label}: ${Math.abs(c.parsed.y)}` }
+                        },
+                        // --- NEW: Use the annotation object ---
+                        annotation: {
+                            annotations: annotations
                         }
                     },
                     scales: {
                         x: { stacked: true, title: { display: true, text: 'Strike Price', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
-                        y: { stacked: true, position: 'left', title: { display: true, text: 'Contracts per Strike', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
+                        y: { stacked: true, position: 'left', title: { display: true, text: 'Open Interest & Volume', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
                         y1: { position: 'right', title: { display: true, text: 'Cumulative Contracts', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' }, grid: { drawOnChartArea: false } }
                     }
                 }
             });
-            ctx.canvas.style.height = '500px';
+            ctx.canvas.style.height = '600px'; // Increased height for better visibility
         }
     </script>
 </body>

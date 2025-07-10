@@ -24,6 +24,28 @@ class NASDAQOptionsScraper:
         self.cache_dir = cache_dir
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+    
+    # In options_scraper/scraper.py, inside the NASDAQOptionsScraper class
+
+    def get_stock_info(self, ticker: str):
+        """Fetches summary data for a given stock ticker, including the last price."""
+        LOG.info(f"Fetching stock info for {ticker.upper()}...")
+        # This endpoint provides summary details for the ticker.
+        url = f"{self.base_url}{ticker}/info?assetclass=stocks"
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            # The primary quote is usually found in this part of the response.
+            primary_data = data.get('data', {}).get('primaryData', {})
+            if primary_data and primary_data.get('lastSalePrice'):
+                return {
+                    "last_price": float(primary_data['lastSalePrice'].replace('$', ''))
+                }
+            return None
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"Failed to fetch stock info for {ticker}: {e}")
+            return None
 
     def get_filter_options(self, ticker: str):
         url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
