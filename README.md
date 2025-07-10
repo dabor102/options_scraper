@@ -1,140 +1,116 @@
-# NASDAQ Options chain Scraper
+# NASDAQ Options Chain Scraper
 
-Python Options Chain scraper for the old NASDAQ website : https://old.nasdaq.com
+This is a Python-based options chain scraper for the new NASDAQ website: <https://nasdaq.com>. It allows you to scrape NASDAQ options chain data by hitting the official NASDAQ API endpoint.
 
-## Install 
+This version includes several key improvements over the original:
+
+* **File-based caching**: Caches API responses to avoid re-downloading data.
+* **Targeted data fetching**: You can now fetch options data for a specific expiration date.
+* **Expiration date listing**: A function to quickly fetch and list all available expiration dates for a ticker.
+* **Standardized data**: The output data now uses a 'YYYY-MM-DD' date format.
+
+## Install
 
 ```bash
 pip install options-scraper
 ```
 
-## API
+## API Usage
 
-Use the API if you want to access the scraped data records ( as python objects ) directly.
+You can use the API to get scraped data records as Python objects.
 
-### Usage
+### Basic Scraping
 
 ```python
-
 from options_scraper.scraper import NASDAQOptionsScraper
 from options_scraper.utils import batched
 
 scraper = NASDAQOptionsScraper()
-ticker_symbol = 'XOM'
-kwargs = { "money": 'all',
-           "expir": 'week',
-           "excode": None,
-           "callput": None
-         }
+ticker_symbol = 'AMD'
 
-records_generator = scraper(ticker_symbol, **kwargs)
-
-# Either access each record individually as shown below
+# Get all options data
+records_generator = scraper(ticker_symbol)
 for item in records_generator:
     print(item)
+```
 
-# Or use the batched util to get a list of items
-for items in batched(records_generator, batch_size=100):
-    print(items)
+### Scraping for a Specific Expiration Date
 
+To make your scraping more efficient, you can fetch data for a single expiration date.
+
+```python
+from options_scraper.scraper import NASDAQOptionsScraper
+
+scraper = NASDAQOptionsScraper()
+ticker_symbol = 'AMD'
+expiry_date = '2025-07-11' # Make sure this is a valid date
+
+# Get options data for a single expiration date
+records_generator = scraper(ticker_symbol, expiry=expiry_date)
+for item in records_generator:
+    print(item)
+```
+
+### Listing all Available Expiration Dates
+
+You can also fetch a list of all available expiration dates for a given ticker.
+
+```python
+from options_scraper.scraper import NASDAQOptionsScraper
+
+scraper = NASDAQOptionsScraper()
+ticker_symbol = 'AMD'
+
+# Get a list of all expiration dates
+expiration_dates = scraper.get_expiration_dates(ticker_symbol)
+print(expiration_dates)
 ```
 
 ### Output
 
-Each scraped record will have the following structure
+Each scraped record will have the following structure:
 
-
-```python
-
-{'Ask': '23.20',
- 'Bid': '18.50',
- 'Calls': 'Apr 24, 2020',
- 'Chg': '',
- 'Last': '19.40',
- 'Open Int': '15',
- 'Puts': 'Apr 24, 2020',
- 'Root': 'XOM',
- 'Strike': '60',
- 'Vol': '0'}
-
-{'Ask': '28.20',
- 'Bid': '23.50',
- 'Calls': 'Apr 24, 2020',
- 'Chg': '',
- 'Last': '29.67',
- 'Open Int': '3',
- 'Puts': 'Apr 24, 2020',
- 'Root': 'XOM',
- 'Strike': '65',
- 'Vol': '0'}
-
+```json
+{
+    "Root": "AMD",
+    "Calls": "AMD250711C00050000",
+    "Last": "119.50",
+    "Chg": "0.00",
+    "Bid": "118.85",
+    "Ask": "120.35",
+    "Vol": "0",
+    "Open Int": "1",
+    "Strike": "50.00",
+    "Puts": null,
+    "Expiry Date": "2025-07-11"
+}
 ```
 
 ## Console Script
 
-Use this script to scrape records and save them either in CSV or JSON format.
+You can also use the command-line script to scrape records and save them to either a CSV or JSON file.
 
 ```bash
 options-scraper --help
 ```
 
-```text
-usage: options-scraper [-h]
-                       [-l {CRITICAL,FATAL,ERROR,WARN,WARNING,INFO,DEBUG,NOTSET}]
-                       [-t TICKER] 
-                       [-o ODIR] 
-                       [-b BATCH_SIZE] 
-                       [-c {call,put}]
-                       [-m {all,in,out,near}] 
-                       [-e EXCODE]
-                       [-x {week,stan,quart,cebo}] 
-                       [-s {json,csv}]
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -l {CRITICAL,FATAL,ERROR,WARN,WARNING,INFO,DEBUG,NOTSET}, --log-level {CRITICAL,FATAL,ERROR,WARN,WARNING,INFO,DEBUG,NOTSET}
-  -t TICKER, --ticker TICKER Ticker Symbol
-  -o ODIR, --odir ODIR  Output directory
-  -b BATCH_SIZE, --batch_size BATCH_SIZE Batch Size
-  -c {call,put}, --callput {call,put}
-  -m {all,in,out,near}, --money {all,in,out,near}
-  -e EXCODE, --excode EXCODE excode
-  -x {week,stan,quart,cebo}, --expir {week,stan,quart,cebo}
-  -s {json,csv}, --serialize {json,csv} Serialization format
-```
-
-
-#### Serialization format (-s)
-You have an option to output the data either in a CSV file or a JSON file.
-Default format is CSV.
-
-#### Batch Size (-b)
-Define how many records each csv or json file should have.
-
-
 ### Examples
-1. To get all the option chain for XOM in a batch_size of 1000 and `csv` file format.
-This will make sure that each CSV file has 1000 records in it.
-The last file will have the remaining records
 
-```bash
-options-scraper -t XOM -o /Users/abhishek/options_data -b 1000 -s csv
-```
+1.  **Get all option chain data for XOM and save as CSV**
+    This will save the data in batches of 1000 records per file.
 
+    ```bash
+    options-scraper -t XOM -o /path/to/your/data -b 1000 -s csv
+    ```
 
-2. To get all option chain data for MSFT in a batch_size of 10 and `json` file format.
-```bash
-options-scraper -t MSFT -o /Users/abhishek/options_data -b 10 -s json
-```
+2.  **Get all option chain data for MSFT and save as JSON**
 
-3. To get all `put` options with weekly expiry.
-```bash
-options-scraper -t XOM -e cbo -c put -x week -o /Users/abhishek/options_data
-```
+    ```bash
+    options-scraper -t MSFT -o /path/to/your/data -b 10 -s json
+    ```
 
-4. To get all `call` options with `cebo` expiry.
-```bash
-options-scraper -t XOM -c call -x cebo -o /Users/abhishek/options_data
-```
+3.  **Get all `put` options with weekly expiry**
 
-
+    ```bash
+    options-scraper -t XOM -c put -x week -o /path/to/your/data
+    
