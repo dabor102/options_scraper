@@ -1,110 +1,162 @@
 import logging
-import re
-import urllib.parse
-
 import requests
-from lxml import etree
-
-from options_scraper.utils import batched, get_text
+import itertools
+import os
+import json
+import time
+from urllib.parse import urlencode
 
 LOG = logging.getLogger(__name__)
 
 __all__ = ['NASDAQOptionsScraper']
 
-last_number_pattern = re.compile(r"(?<=&page=)\d+")
-nasdaq_base_url = "https://old.nasdaq.com"
-
-
 class NASDAQOptionsScraper:
+    """
+    Scrapes NASDAQ options chain data by hitting the official NASDAQ API endpoint,
+    with built-in file-based caching.
+    """
+    def __init__(self, cache_dir='cache'):
+        self.base_url = "https://api.nasdaq.com/api/quote/"
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
+        })
+        self.cache_dir = cache_dir
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
+    def get_filter_options(self, ticker: str):
+        url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return data.get('data', {}).get('filterlist', {})
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"Failed to fetch filter options for {ticker}: {e}")
+            return None
+
+    # --- NEW: Efficiently fetches only the expiration dates ---
+    def get_expiration_dates(self, ticker: str):
+        """Quickly fetches the list of available expiration dates."""
+        LOG.info(f"Fetching available expiration dates for {ticker.upper()}...")
+        filter_list = self.get_filter_options(ticker)
+        if not filter_list:
+            LOG.error("Could not retrieve filter list for expiration dates.")
+            return []
+        
+        # Extract date values (e.g., '2025-09-19|2025-09-19')
+        dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+        # Parse to 'YYYY-MM-DD' format
+        parsed_dates = [d.split('|')[0] for d in dates_raw if '|' in d]
+        return parsed_dates
 
     @staticmethod
-    def gen_pages(url):
+    def parse_json_records(json_data, ticker):
+        rows = json_data.get('data', {}).get('table', {}).get('rows', [])
+        # The user provided sample data uses 'Sep 19', but the API and other functions use 'YYYY-MM-DD'.
+        # We will standardize on 'YYYY-MM-DD' which comes from the API parameters.
+        # The 'expiryDate' field in the raw JSON is less reliable.
+        expiry_date = json_data.get('data', {}).get('filters', {}).get('fromdate', {}).get('value', '').split('|')[0]
+        
+        for row in rows:
+            if not row.get('strike'):
+                continue
+            if row.get('c_Last') and row['c_Last'] != '--':
+                yield {
+                    'Root': ticker.upper(), 'Calls': row.get('drillDownURL', '').split('/')[-1],
+                    'Last': row.get('c_Last'), 'Chg': row.get('c_Change'), 'Bid': row.get('c_Bid'),
+                    'Ask': row.get('c_Ask'), 'Vol': row.get('c_Volume'), 'Open Int': row.get('c_Openinterest'),
+                    'Strike': row.get('strike'), 'Puts': None, 'Expiry Date': expiry_date,
+                }
+            if row.get('p_Last') and row['p_Last'] != '--':
+                yield {
+                    'Root': ticker.upper(), 'Puts': row.get('drillDownURL', '').replace('C', 'P').split('/')[-1],
+                    'Last': row.get('p_Last'), 'Chg': row.get('p_Change'), 'Bid': row.get('p_Bid'),
+                    'Ask': row.get('p_Ask'), 'Vol': row.get('p_Volume'), 'Open Int': row.get('p_Openinterest'),
+                    'Strike': row.get('strike'), 'Calls': None, 'Expiry Date': expiry_date,
+                }
+
+    # --- UPDATED: Main method now accepts a specific expiry date ---
+    def __call__(self, ticker, expiry=None, **kwargs):
         """
-        Description:
-            If for a given query the results are paginated then
-            we should traverse the pages too. This function exactly does that.
-
-        Args:
-            URL - The main URL
-
-        Returns:
-            Generator - All the other pages in the search results if present.
-
+        Main method to scrape options data.
+        If 'expiry' is provided, fetches data only for that date.
+        Otherwise, it fetches for all available dates.
         """
-        response = requests.get(url)
-        tree = etree.HTML(response.content)
-        for element in tree.xpath("//*[@id='quotes_content_left_lb_LastPage']"):
-            if element is not None:
-                last_url = element.attrib["href"]
-                page_numbers = re.findall(last_number_pattern, last_url)
-                if page_numbers:
-                    last_page = int(page_numbers[0])
-                    for i in range(2, last_page + 1):
-                        url_to_scrap = "{0}&page={1}".format(url, i)
-                        yield url_to_scrap
+        LOG.info(f"Fetching available filters for {ticker.upper()}...")
+        filter_list = self.get_filter_options(ticker)
+        if not filter_list:
+            LOG.error("Could not retrieve filter list. Aborting.")
+            return
 
-    @staticmethod
-    def gen_page_records(url):
-        """
-        Description:
-            Scrape Options data from the given URL.
-            This is a 2 step process.
-                1. First, extract the headers
-                2. Then, the data rows.
+        # --- UPDATED: Logic to handle a single expiry date ---
+        if expiry:
+            LOG.info(f"Fetching on-demand for single expiration: {expiry}")
+            # Format the single date to match the API's 'from|to' requirement
+            dates = [f'{expiry}|{expiry}']
+        else:
+            # Fallback to fetching all dates if no specific expiry is given
+            dates = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
 
-        Args:
-            url: NASDAQ URL to scrape
+        types = [f['value'] for f in filter_list.get('type', {}).get('filter', [])]
+        moneyness = [f['value'] for f in filter_list.get('money', {}).get('filter', [])]
+        
+        combinations = list(itertools.product(dates, types, moneyness))
+        total_combos = len(combinations)
+        LOG.info(f"Found {total_combos} filter combinations to process.")
 
-        Returns:
-            Generator: Data records each as a dictionary
+        for i, combo in enumerate(combinations):
+            date_range, type_val, money_val = combo
+            
+            try:
+                from_date, to_date = date_range.split('|')
+            except ValueError:
+                LOG.warning(f"Skipping invalid date range: {date_range}")
+                continue
 
-        """
-        response = requests.get(url)
-        tree = etree.HTML(response.content)
-        headers = []
-        # First, we will extract the table headers.
-        for element in tree.xpath(
-                "//div[@class='OptionsChain-chart borderAll thin']"):
-            for thead_element in element.xpath("table/thead/tr/th"):
-                a_element = thead_element.find("a")
-                if a_element is not None:
-                    headers.append(a_element.text.strip())
-                else:
-                    headers.append(thead_element.text.strip())
+            cache_filename = f"{ticker}_{from_date}_{to_date}_{type_val}_{money_val}.json"
+            cache_filepath = os.path.join(self.cache_dir, cache_filename)
 
-        # Then, the data rows.
-        for element in tree.xpath(
-                "//div[@class='OptionsChain-chart borderAll thin']"):
-            for trow_elem in element.xpath("//tr"):
-                data_row = [get_text(x) for x in trow_elem.findall("td")]
-                if len(headers) == len(data_row):
-                    yield dict(zip(headers, data_row))
+            if os.path.exists(cache_filepath):
+                LOG.info(f"Cache HIT for combo {i+1}/{total_combos}. Loading from file.")
+                with open(cache_filepath, 'r') as f:
+                    json_data = json.load(f)
+            else:
+                LOG.info(f"Cache MISS for combo {i+1}/{total_combos}. Fetching from API.")
+                params = {
+                    'assetclass': 'stocks', 'fromdate': from_date, 'todate': to_date,
+                    'type': type_val, 'money': money_val, 'limit': 10000
+                }
+                full_url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+                
+                try:
+                    response = self.session.get(full_url, timeout=20)
+                    response.raise_for_status()
+                    json_data = response.json()
+                    
+                    with open(cache_filepath, 'w') as f:
+                        json.dump(json_data, f)
+                    
+                    time.sleep(1) 
+                except requests.exceptions.RequestException as e:
+                    LOG.error(f"Failed to scrape URL {full_url}: {e}")
+                    continue
+            
+            for record in self.parse_json_records(json_data, ticker):
+                yield record
 
-    def __call__(self, ticker, **kwargs):
-        """
-        Description:
-            Constructs a NASDAQ specific URL for the given Ticker Symbol and options.
-            Then traverses the option data found at the URL. If there are more pages,
-            the data records on the pages are scraped too.
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s :: [%(levelname)s] :: %(message)s")
+    test_ticker = 'AMD'
+    print(f"--- Running Individual Test for {test_ticker.upper()} ---")
+    scraper = NASDAQOptionsScraper()
 
-        Args:
-            ticker: A valid Ticker Symbol
-            **kwargs: Mapping of query parameters that should be passed to the NASDAQ URL
-
-        Returns:
-            Generator: Each options data record as a python dictionary till
-            the last page is reached.
-        """
-        params = urllib.parse.urlencode(
-            dict((k, v) for k, v in kwargs.items() if v is not None))
-        url = f"{nasdaq_base_url}/symbol/{ticker.lower()}/option-chain?{params}"
-
-        LOG.info("Scraping data from URL %s", url)
-        for rec in self.gen_page_records(url):
-            yield rec
-
-        for url in self.gen_pages(url):
-            LOG.info("Scraping data from URL %s", url)
-            for rec in self.gen_page_records(url):
-                yield rec
-
+    # --- Test new on-demand fetching for a single date ---
+    test_expiry_date = '2025-07-11'
+    print(f"\n--- Testing fetch for single expiry: {test_expiry_date} ---")
+    record_count = 0
+    for record in scraper(test_ticker, expiry=test_expiry_date):
+        print(json.dumps(record, indent=4))
+        record_count += 1
+    print(f"--- Test Complete: Found {record_count} records for {test_expiry_date} ---")
