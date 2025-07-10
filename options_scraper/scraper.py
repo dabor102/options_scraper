@@ -36,7 +36,6 @@ class NASDAQOptionsScraper:
             LOG.error(f"Failed to fetch filter options for {ticker}: {e}")
             return None
 
-    # --- NEW: Efficiently fetches only the expiration dates ---
     def get_expiration_dates(self, ticker: str):
         """Quickly fetches the list of available expiration dates."""
         LOG.info(f"Fetching available expiration dates for {ticker.upper()}...")
@@ -54,7 +53,6 @@ class NASDAQOptionsScraper:
     @staticmethod
     def parse_json_records(json_data, ticker):
         rows = json_data.get('data', {}).get('table', {}).get('rows', [])
-        # The user provided sample data uses 'Sep 19', but the API and other functions use 'YYYY-MM-DD'.
         # We will standardize on 'YYYY-MM-DD' which comes from the API parameters.
         # The 'expiryDate' field in the raw JSON is less reliable.
         expiry_date = json_data.get('data', {}).get('filters', {}).get('fromdate', {}).get('value', '').split('|')[0]
@@ -77,7 +75,6 @@ class NASDAQOptionsScraper:
                     'Strike': row.get('strike'), 'Calls': None, 'Expiry Date': expiry_date,
                 }
 
-    # --- UPDATED: Main method now accepts a specific expiry date ---
     def __call__(self, ticker, expiry=None, **kwargs):
         """
         Main method to scrape options data.
