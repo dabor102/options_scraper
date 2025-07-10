@@ -58,12 +58,12 @@ class NASDAQOptionsScraper:
         except requests.exceptions.RequestException as e:
             LOG.error(f"Failed to fetch filter options for {ticker}: {e}")
             return None
-
-
-    def _parse_date(date_str: str) -> str:
+        
+    def _parse_date(self, date_str: str) -> str:
         """
         Parses a date string that could be in one of several formats
         (e.g., 'MM/DD/YYYY' or 'Mon DD') and returns it as 'YYYY-MM-DD'.
+        This is now a method of the class.
         """
         try:
             # First, try the full 'MM/DD/YYYY' format
@@ -114,24 +114,50 @@ class NASDAQOptionsScraper:
                 LOG.warning(f"API returned no option data for the date range for {ticker}.")
                 return self._get_fallback_expiration_dates(ticker)
 
-            # Extract all potential date strings
-            all_date_strs = {row['expiryDate'] for row in rows if 'expiryDate' in row}
+            # --- THE FIX ---
+            # Add a check to ensure the value of 'expiryDate' is not None.
+            all_date_strs = {row['expiryDate'] for row in rows if 'expiryDate' in row and row['expiryDate'] is not None}
 
             formatted_dates = set()
             for d_str in all_date_strs:
-                parsed = _parse_date(d_str)
+                parsed = self._parse_date(d_str)
                 if parsed is not None:
                     formatted_dates.add(parsed)
             
             if not formatted_dates:
                 LOG.error(f"Could not parse any valid expiration dates from the API response for {ticker}.")
                 return []
-                
+            
             LOG.info(f"Successfully found {len(formatted_dates)} unique expiration dates.")
             return sorted(list(formatted_dates))
 
         except requests.exceptions.RequestException as e:
             LOG.error(f"Failed to fetch expiration dates for {ticker}: {e}")
+            return []
+
+            
+    # Make sure you have the fallback function from before as well
+    def _get_fallback_expiration_dates(self, ticker: str):
+        # ... (the fallback code remains the same)
+        LOG.info(f"Using fallback method to get expiration dates for {ticker.upper()}.")
+        url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            filter_list = data.get('data', {}).get('filterlist', {})
+
+            if not filter_list:
+                return []
+            
+            dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+            all_dates = {d.split('|')[0] for d in dates_raw if '|' in d}
+            
+            LOG.info(f"Found {len(all_dates)} dates via fallback method.")
+            return sorted(list(all_dates))
+
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"Fallback method also failed for {ticker}: {e}")
             return []
 
 
