@@ -1,25 +1,27 @@
-NASDAQ Options Chain Scraper
-This is a Python-based options chain scraper for the new NASDAQ website: https://nasdaq.com. It allows you to scrape NASDAQ options chain data by hitting the official NASDAQ API endpoint.
+# NASDAQ Options Chain Scraper
+
+This is a Python-based options chain scraper for the new NASDAQ website: <https://nasdaq.com>. It allows you to scrape NASDAQ options chain data by hitting the official NASDAQ API endpoint.
 
 This version includes several key improvements over the original:
 
-File-based caching: Caches API responses to avoid re-downloading data.
+* **File-based caching**: Caches API responses to avoid re-downloading data.
+* **Targeted data fetching**: You can now fetch options data for a specific expiration date.
+* **Expiration date listing**: A function to quickly fetch and list all available expiration dates for a ticker.
+* **Standardized data**: The output data now uses a 'YYYY-MM-DD' date format.
 
-Targeted data fetching: You can now fetch options data for a specific expiration date.
+## Install
 
-Expiration date listing: A function to quickly fetch and list all available expiration dates for a ticker.
-
-Standardized data: The output data now uses a 'YYYY-MM-DD' date format.
-
-Install
-Bash
+```bash
 pip install options-scraper
-API Usage
+```
+
+## API Usage
+
 You can use the API to get scraped data records as Python objects.
 
-Basic Scraping
+### Basic Scraping
 
-Python
+```python
 from options_scraper.scraper import NASDAQOptionsScraper
 from options_scraper.utils import batched
 
@@ -30,11 +32,13 @@ ticker_symbol = 'AMD'
 records_generator = scraper(ticker_symbol)
 for item in records_generator:
     print(item)
-Scraping for a Specific Expiration Date
+```
+
+### Scraping for a Specific Expiration Date
 
 To make your scraping more efficient, you can fetch data for a single expiration date.
 
-Python
+```python
 from options_scraper.scraper import NASDAQOptionsScraper
 
 scraper = NASDAQOptionsScraper()
@@ -45,11 +49,13 @@ expiry_date = '2025-07-11' # Make sure this is a valid date
 records_generator = scraper(ticker_symbol, expiry=expiry_date)
 for item in records_generator:
     print(item)
-Listing all Available Expiration Dates
+```
+
+### Listing all Available Expiration Dates
 
 You can also fetch a list of all available expiration dates for a given ticker.
 
-Python
+```python
 from options_scraper.scraper import NASDAQOptionsScraper
 
 scraper = NASDAQOptionsScraper()
@@ -58,11 +64,13 @@ ticker_symbol = 'AMD'
 # Get a list of all expiration dates
 expiration_dates = scraper.get_expiration_dates(ticker_symbol)
 print(expiration_dates)
-Output
+```
+
+### Output
 
 Each scraped record will have the following structure:
 
-Python
+```json
 {
     "Root": "AMD",
     "Calls": "AMD250711C00050000",
@@ -76,23 +84,33 @@ Python
     "Puts": null,
     "Expiry Date": "2025-07-11"
 }
-Console Script
+```
+
+## Console Script
+
 You can also use the command-line script to scrape records and save them to either a CSV or JSON file.
 
-Bash
+```bash
 options-scraper --help
-Examples
+```
 
-Get all option chain data for XOM and save as CSV
-This will save the data in batches of 1000 records per file.
+### Examples
 
-Bash
-options-scraper -t XOM -o /path/to/your/data -b 1000 -s csv
-Get all option chain data for MSFT and save as JSON
+1.  **Get all option chain data for XOM and save as CSV**
+    This will save the data in batches of 1000 records per file.
 
-Bash
-options-scraper -t MSFT -o /path/to/your/data -b 10 -s json
-Get all put options with weekly expiry
+    ```bash
+    options-scraper -t XOM -o /path/to/your/data -b 1000 -s csv
+    ```
 
-Bash
-options-scraper -t XOM -c put -x week -o /path/to/your/data
+2.  **Get all option chain data for MSFT and save as JSON**
+
+    ```bash
+    options-scraper -t MSFT -o /path/to/your/data -b 10 -s json
+    ```
+
+3.  **Get all `put` options with weekly expiry**
+
+    ```bash
+    options-scraper -t XOM -c put -x week -o /path/to/your/data
+    
