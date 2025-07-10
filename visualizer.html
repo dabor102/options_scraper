@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Options Open Interest Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-7xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-white">Options Profile Visualizer</h1>
+            <p class="text-gray-400 mt-2">Analyze Open Interest and Volume by Strike Price</p>
+        </header>
+
+        <!-- Controls Section -->
+        <div class="bg-gray-800 p-6 rounded-xl shadow-lg mb-8 w-full max-w-md mx-auto">
+            <div class="space-y-4">
+                <div>
+                    <label for="ticker" class="block text-sm font-medium text-gray-300 mb-1">Enter Ticker Symbol (e.g., SPY, TSLA):</label>
+                    <input type="text" id="ticker" name="ticker" class="w-full bg-gray-700 border border-gray-600 text-white rounded-lg p-3 focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="AMD">
+                </div>
+                <div>
+                    <label for="expirations" class="block text-sm font-medium text-gray-300 mb-1">Select an Expiration Date:</label>
+                    <select id="expirations" name="expirations" class="w-full bg-gray-700 border border-gray-600 text-white rounded-lg p-3 focus:ring-2 focus:ring-blue-500 focus:border-blue-500" disabled>
+                        <option>Enter a ticker first</option>
+                    </select>
+                </div>
+                <button id="analyzeBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 ease-in-out flex items-center justify-center disabled:bg-gray-500 disabled:cursor-not-allowed">
+                    <span id="btn-text">Analyze ✨</span>
+                    <div id="btn-loader" class="loader hidden" style="width: 24px; height: 24px; border-width: 3px;"></div>
+                </button>
+            </div>
+        </div>
+
+        <!-- Chart Section -->
+        <div id="chart-container" class="bg-gray-800 p-6 rounded-xl shadow-lg w-full" style="display: none;">
+            <canvas id="optionsChart"></canvas>
+        </div>
+        
+        <!-- Message Section -->
+        <div id="message-box" class="text-center mt-8 text-gray-400"></div>
+
+    </div>
+
+    <script type="text/python">
+        # This block contains all the necessary Python code that Pyodide will run.
+        # It includes your scraper and the new data processing logic.
+
+        import logging
+        import requests
+        import itertools
+        import os
+        import json
+        import time
+        from urllib.parse import urlencode
+        from collections import defaultdict
+        import pandas as pd
+
+        # --- Your Existing Scraper Code ---
+        class NASDAQOptionsScraper:
+            def __init__(self, cache_dir='cache'):
+                self.base_url = "https://api.nasdaq.com/api/quote/"
+                self.session = requests.Session()
+                self.session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
+                })
+                # Note: Pyodide runs in a virtual filesystem, so caching is temporary for the session.
+                self.cache_dir = cache_dir
+                if not os.path.exists(self.cache_dir):
+                    os.makedirs(self.cache_dir)
+
+            def get_filter_options(self, ticker: str):
+                url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
+                try:
+                    response = self.session.get(url, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    return data.get('data', {}).get('filterlist', {})
+                except requests.exceptions.RequestException as e:
+                    print(f"Failed to fetch filter options for {ticker}: {e}")
+                    return None
+
+            def get_expiration_dates(self, ticker: str):
+                filter_list = self.get_filter_options(ticker)
+                if not filter_list:
+                    return []
+                dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+                parsed_dates = sorted([d.split('|')[0] for d in dates_raw if '|' in d])
+                return parsed_dates
+
+            @staticmethod
+            def parse_json_records(json_data, ticker):
+                rows = json_data.get('data', {}).get('table', {}).get('rows', [])
+                expiry_date = json_data.get('data', {}).get('filters', {}).get('fromdate', {}).get('value', '').split('|')[0]
+                
+                for row in rows:
+                    if not row.get('strike'):
+                        continue
+                    if row.get('c_Last') and row['c_Last'] != '--':
+                        yield {
+                            'type': 'call',
+                            'strike': float(row.get('strike')),
+                            'volume': int(row.get('c_Volume').replace(',', '')),
+                            'open_interest': int(row.get('c_Openinterest').replace(',', ''))
+                        }
+                    if row.get('p_Last') and row['p_Last'] != '--':
+                        yield {
+                            'type': 'put',
+                            'strike': float(row.get('strike')),
+                            'volume': int(row.get('p_Volume').replace(',', '')),
+                            'open_interest': int(row.get('p_Openinterest').replace(',', ''))
+                        }
+
+            def __call__(self, ticker, expiry=None, **kwargs):
+                if not expiry:
+                    print("Expiry date must be provided.")
+                    return
+
+                params = {
+                    'assetclass': 'stocks', 'fromdate': expiry, 'todate': expiry,
+                    'limit': 10000
+                }
+                full_url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+                
+                try:
+                    response = self.session.get(full_url, timeout=20)
+                    response.raise_for_status()
+                    json_data = response.json()
+                    
+                    for record in self.parse_json_records(json_data, ticker):
+                        yield record
+                except requests.exceptions.RequestException as e:
+                    print(f"Failed to scrape URL {full_url}: {e}")
+
+        # --- New Preprocessing Function ---
+        def preprocess_for_chart(raw_data):
+            """
+            Aggregates raw options data by strike price for visualization.
+            """
+            if not raw_data:
+                return {}
+
+            df = pd.DataFrame(raw_data)
+
+            # Aggregate data by strike and type
+            agg_df = df.groupby(['strike', 'type']).sum().unstack(fill_value=0)
+            agg_df.columns = ['_'.join(col).strip() for col in agg_df.columns.values]
+            
+            # Ensure all required columns exist
+            for col in ['open_interest_call', 'open_interest_put', 'volume_call', 'volume_put']:
+                if col not in agg_df.columns:
+                    agg_df[col] = 0
+
+            agg_df = agg_df.sort_index()
+
+            # Calculate cumulative values
+            agg_df['cumulative_oi'] = (agg_df['open_interest_call'] + agg_df['open_interest_put']).cumsum()
+            agg_df['cumulative_vol'] = (agg_df['volume_call'] + agg_df['volume_put']).cumsum()
+
+            # Prepare data for JSON serialization
+            chart_data = {
+                'labels': [f"{s:.2f}" for s in agg_df.index.tolist()],
+                'call_oi': agg_df['open_interest_call'].tolist(),
+                'put_oi': (-agg_df['open_interest_put']).tolist(), # Negative for chart display
+                'call_vol': agg_df['volume_call'].tolist(),
+                'put_vol': (-agg_df['volume_put']).tolist(), # Negative for chart display
+                'cumulative_oi': agg_df['cumulative_oi'].tolist(),
+                'cumulative_vol': agg_df['cumulative_vol'].tolist(),
+            }
+            return chart_data
+
+        # --- Main execution functions called from JavaScript ---
+        def get_expirations_py(ticker):
+            scraper = NASDAQOptionsScraper()
+            dates = scraper.get_expiration_dates(ticker)
+            return json.dumps(dates)
+
+        def get_chart_data_py(ticker, expiry):
+            scraper = NASDAQOptionsScraper()
+            raw_data = list(scraper(ticker, expiry=expiry))
+            if not raw_data:
+                return json.dumps({"error": "No data found for the selected criteria."})
+            
+            processed_data = preprocess_for_chart(raw_data)
+            return json.dumps(processed_data)
+
+    </script>
+
+    <script>
+        const tickerInput = document.getElementById('ticker');
+        const expirationsSelect = document.getElementById('expirations');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const chartContainer = document.getElementById('chart-container');
+        const messageBox = document.getElementById('message-box');
+        const btnText = document.getElementById('btn-text');
+        const btnLoader = document.getElementById('btn-loader');
+        
+        let pyodide = null;
+        let optionsChart = null;
+
+        async function main() {
+            messageBox.textContent = 'Initializing Python environment... This may take a moment.';
+            pyodide = await loadPyodide();
+            await pyodide.loadPackage(["micropip", "pandas"]);
+            const micropip = pyodide.pyimport("micropip");
+            await micropip.install('requests');
+            messageBox.textContent = 'Ready. Enter a ticker to begin.';
+        }
+        
+        main();
+
+        // --- Event Listeners ---
+        tickerInput.addEventListener('change', async (e) => {
+            const ticker = e.target.value.trim().toUpperCase();
+            if (!ticker) return;
+
+            setLoadingState(true, 'Fetching expirations...');
+            expirationsSelect.disabled = true;
+            expirationsSelect.innerHTML = '<option>Loading...</option>';
+
+            try {
+                // Get the Python code from the script tag
+                const pythonCode = document.querySelector('script[type="text/python"]').textContent;
+                await pyodide.runPythonAsync(pythonCode);
+                
+                // Call the Python function
+                const pyProxy = pyodide.globals.get('get_expirations_py');
+                const results = await pyProxy(ticker);
+                const dates = JSON.parse(results);
+                
+                if (dates.length > 0) {
+                    populateExpirations(dates);
+                    messageBox.textContent = 'Select an expiration date and click Analyze.';
+                } else {
+                    expirationsSelect.innerHTML = '<option>No dates found</option>';
+                    messageBox.textContent = 'Could not find any expiration dates for this ticker.';
+                }
+
+            } catch (error) {
+                console.error('Error fetching expirations:', error);
+                messageBox.textContent = 'An error occurred while fetching expiration dates.';
+                expirationsSelect.innerHTML = '<option>Error</option>';
+            } finally {
+                setLoadingState(false);
+            }
+        });
+
+        analyzeBtn.addEventListener('click', async () => {
+            const ticker = tickerInput.value.trim().toUpperCase();
+            const expiry = expirationsSelect.value;
+
+            if (!ticker || !expiry || expirationsSelect.disabled) {
+                messageBox.textContent = 'Please select a valid ticker and expiration date.';
+                return;
+            }
+
+            setLoadingState(true, 'Analyzing...');
+            chartContainer.style.display = 'none';
+
+            try {
+                const pythonCode = document.querySelector('script[type="text/python"]').textContent;
+                await pyodide.runPythonAsync(pythonCode);
+
+                const pyProxy = pyodide.globals.get('get_chart_data_py');
+                const results = await pyProxy(ticker, expiry);
+                const data = JSON.parse(results);
+
+                if (data.error) {
+                    messageBox.textContent = data.error;
+                } else if (data.labels && data.labels.length > 0) {
+                    renderChart(data, ticker, expiry);
+                    chartContainer.style.display = 'block';
+                    messageBox.textContent = '';
+                } else {
+                    messageBox.textContent = 'No data returned for the chart.';
+                }
+
+            } catch (error) {
+                console.error('Error analyzing data:', error);
+                messageBox.textContent = 'An error occurred during analysis.';
+            } finally {
+                setLoadingState(false, 'Analyze ✨');
+            }
+        });
+
+        // --- UI Helper Functions ---
+        function setLoadingState(isLoading, text = 'Analyze ✨') {
+            analyzeBtn.disabled = isLoading;
+            if (isLoading) {
+                btnText.classList.add('hidden');
+                btnLoader.classList.remove('hidden');
+            } else {
+                btnText.textContent = text;
+                btnText.classList.remove('hidden');
+                btnLoader.classList.add('hidden');
+            }
+        }
+
+        function populateExpirations(dates) {
+            expirationsSelect.innerHTML = '';
+            dates.forEach(date => {
+                const option = document.createElement('option');
+                option.value = date;
+                option.textContent = date;
+                expirationsSelect.appendChild(option);
+            });
+            expirationsSelect.disabled = false;
+        }
+
+        function renderChart(data, ticker, expiry) {
+            const ctx = document.getElementById('optionsChart').getContext('2d');
+            
+            if (optionsChart) {
+                optionsChart.destroy();
+            }
+
+            optionsChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'Call OI',
+                            data: data.call_oi,
+                            backgroundColor: 'rgba(22, 163, 74, 0.8)', // green-600
+                            borderColor: 'rgba(22, 163, 74, 1)',
+                            borderWidth: 1,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Put OI',
+                            data: data.put_oi,
+                            backgroundColor: 'rgba(220, 38, 38, 0.8)', // red-600
+                            borderColor: 'rgba(220, 38, 38, 1)',
+                            borderWidth: 1,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Cumulative OI',
+                            data: data.cumulative_oi,
+                            type: 'line',
+                            borderColor: 'rgba(234, 179, 8, 1)', // yellow-500
+                            backgroundColor: 'transparent',
+                            tension: 0.1,
+                            yAxisID: 'y1',
+                            pointRadius: 0
+                        },
+                         {
+                            label: 'Cumulative Volume',
+                            data: data.cumulative_vol,
+                            type: 'line',
+                            borderColor: 'rgba(59, 130, 246, 1)', // blue-500
+                            backgroundColor: 'transparent',
+                            tension: 0.1,
+                            yAxisID: 'y1',
+                            pointRadius: 0,
+                            hidden: true // Hidden by default
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: `${ticker} Open Interest & Volume Profile | Exp: ${expiry}`,
+                            font: { size: 20 },
+                            color: '#E5E7EB'
+                        },
+                        legend: {
+                            labels: { color: '#D1D5DB' }
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        // Show absolute value for puts
+                                        label += Math.abs(context.parsed.y);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            stacked: true,
+                            title: {
+                                display: true,
+                                text: 'Strike Price',
+                                color: '#9CA3AF',
+                                font: { size: 14 }
+                            },
+                            ticks: { color: '#9CA3AF' }
+                        },
+                        y: {
+                            stacked: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Contracts per Strike',
+                                color: '#9CA3AF',
+                                font: { size: 14 }
+                            },
+                            ticks: { color: '#9CA3AF' }
+                        },
+                        y1: {
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Cumulative Contracts',
+                                color: '#9CA3AF',
+                                font: { size: 14 }
+                            },
+                            ticks: { color: '#9CA3AF' },
+                            grid: {
+                                drawOnChartArea: false, // only draw grid for y axis
+                            }
+                        }
+                    }
+                }
+            });
+             // Set canvas height after chart is created
+            ctx.canvas.style.height = '500px';
+        }
+
+    </script>
+</body>
+</html>
