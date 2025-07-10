@@ -1,6 +1,6 @@
 # NASDAQ Options chain Scraper
 
-Python Options Chain scraper for the old NASDAQ website : https://old.nasdaq.com
+Python Options Chain scraper for the new NASDAQ website : https:/nasdaq.com
 
 ## Install 
 
