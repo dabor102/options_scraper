@@ -58,52 +58,66 @@ class NASDAQOptionsScraper:
             LOG.error(f"Failed to fetch filter options for {ticker}: {e}")
             return None
 
-    # In options_scraper/scraper.py, replace the entire get_expiration_dates method
+
+    # In options_scraper/scraper.py
 
     def get_expiration_dates(self, ticker: str):
         """
-        Quickly fetches a comprehensive list of available expiration dates
-        by querying for each expiration type.
+        Fetches the full list of available expiration dates using a primary method,
+        with a fallback for tickers that have a different API response structure.
         """
-        LOG.info(f"Fetching all available expiration dates for {ticker.upper()}...")
+        LOG.info(f"Fetching comprehensive expiration date list for {ticker.upper()}...")
+        
+        # --- Primary Method ---
+        # First, try to get the full list from the /info endpoint. This works for most stocks.
+        url = f"{self.base_url}{ticker}/info?assetclass=stocks"
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            expirations_raw = data.get('data', {}).get('nextSteps', {}).get('optionchain', [])
+            
+            if expirations_raw:
+                all_dates = {item['value'].split('|')[0] for item in expirations_raw if '|' in item.get('value', '')}
+                if all_dates:
+                    LOG.info(f"Successfully found {len(all_dates)} unique dates via primary method.")
+                    return sorted(list(all_dates))
 
-        # Expiration codes used by the NASDAQ API
-        expir_types = ['week', 'stan', 'quart', 'cebo']
-        all_dates = set()
+            # --- Fallback Method ---
+            # If the primary method fails or returns no dates, log it and try the fallback.
+            LOG.warning(f"Primary method failed for {ticker}. Trying fallback.")
+            return self._get_fallback_expiration_dates(ticker)
 
-        for expir_type in expir_types:
-            params = {
-                'assetclass': 'stocks',
-                'expir': expir_type
-            }
-            url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"Primary fetch method failed for {ticker}: {e}. Trying fallback.")
+            return self._get_fallback_expiration_dates(ticker)
 
-            try:
-                response = self.session.get(url, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                filter_list = data.get('data', {}).get('filterlist', {})
+    def _get_fallback_expiration_dates(self, ticker: str):
+        """
+        A reliable fallback method that queries the option-chain endpoint directly.
+        It may not return all dates but prevents a complete failure.
+        """
+        LOG.info(f"Using fallback method to get expiration dates for {ticker.upper()}.")
+        url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            filter_list = data.get('data', {}).get('filterlist', {})
 
-                if not filter_list:
-                    continue
+            if not filter_list:
+                return []
+            
+            dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+            all_dates = {d.split('|')[0] for d in dates_raw if '|' in d}
+            
+            LOG.info(f"Found {len(all_dates)} dates via fallback method.")
+            return sorted(list(all_dates))
 
-                # Extract date values (e.g., '2025-09-19|2025-09-19')
-                dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
-                # Parse to 'YYYY-MM-DD' format and add to our set to handle duplicates
-                for d in dates_raw:
-                    if '|' in d:
-                        all_dates.add(d.split('|')[0])
-
-            except requests.exceptions.RequestException as e:
-                LOG.error(f"Failed to fetch expirations for type '{expir_type}' for {ticker}: {e}")
-                continue
-
-        if not all_dates:
-            LOG.error(f"Could not retrieve any expiration dates for {ticker}.")
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"Fallback method also failed for {ticker}: {e}")
             return []
-
-        # Return a sorted list of unique dates
-        return sorted(list(all_dates))
 
     @staticmethod
     def parse_json_records(json_data, ticker):
