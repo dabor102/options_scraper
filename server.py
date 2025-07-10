@@ -4,6 +4,7 @@ from flask_cors import CORS
 import pandas as pd
 import requests
 
+
 # Assuming the scraper is in the options_scraper directory
 from options_scraper.scraper import NASDAQOptionsScraper
 
@@ -159,7 +160,7 @@ def get_chart_data(ticker, expiry):
 
     if last_price:
         processed_data['last_price'] = last_price
-        
+
     return jsonify(processed_data)
 
 

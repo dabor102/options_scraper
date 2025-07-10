@@ -58,19 +58,52 @@ class NASDAQOptionsScraper:
             LOG.error(f"Failed to fetch filter options for {ticker}: {e}")
             return None
 
+    # In options_scraper/scraper.py, replace the entire get_expiration_dates method
+
     def get_expiration_dates(self, ticker: str):
-        """Quickly fetches the list of available expiration dates."""
-        LOG.info(f"Fetching available expiration dates for {ticker.upper()}...")
-        filter_list = self.get_filter_options(ticker)
-        if not filter_list:
-            LOG.error("Could not retrieve filter list for expiration dates.")
+        """
+        Quickly fetches a comprehensive list of available expiration dates
+        by querying for each expiration type.
+        """
+        LOG.info(f"Fetching all available expiration dates for {ticker.upper()}...")
+
+        # Expiration codes used by the NASDAQ API
+        expir_types = ['week', 'stan', 'quart', 'cebo']
+        all_dates = set()
+
+        for expir_type in expir_types:
+            params = {
+                'assetclass': 'stocks',
+                'expir': expir_type
+            }
+            url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+
+            try:
+                response = self.session.get(url, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                filter_list = data.get('data', {}).get('filterlist', {})
+
+                if not filter_list:
+                    continue
+
+                # Extract date values (e.g., '2025-09-19|2025-09-19')
+                dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+                # Parse to 'YYYY-MM-DD' format and add to our set to handle duplicates
+                for d in dates_raw:
+                    if '|' in d:
+                        all_dates.add(d.split('|')[0])
+
+            except requests.exceptions.RequestException as e:
+                LOG.error(f"Failed to fetch expirations for type '{expir_type}' for {ticker}: {e}")
+                continue
+
+        if not all_dates:
+            LOG.error(f"Could not retrieve any expiration dates for {ticker}.")
             return []
-        
-        # Extract date values (e.g., '2025-09-19|2025-09-19')
-        dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
-        # Parse to 'YYYY-MM-DD' format
-        parsed_dates = [d.split('|')[0] for d in dates_raw if '|' in d]
-        return parsed_dates
+
+        # Return a sorted list of unique dates
+        return sorted(list(all_dates))
 
     @staticmethod
     def parse_json_records(json_data, ticker):

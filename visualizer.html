@@ -170,7 +170,7 @@
                 optionsChart.destroy();
             }
 
-            // --- NEW: Prepare annotations, including the new last price line ---
+            // Prepare annotations for walls
             const annotations = {
                 callWall: {
                     type: 'line', scaleID: 'x', value: data.call_wall_strike,
@@ -184,21 +184,42 @@
                 }
             };
 
+            // --- NEW: Calculate the precise position for the "Last Price" line ---
             if (data.last_price) {
-                annotations.lastPrice = {
-                    type: 'line',
-                    scaleID: 'x',
-                    value: data.last_price, // The value is numeric, not a label string
-                    borderColor: 'rgba(255, 255, 255, 0.7)',
-                    borderWidth: 2,
-                    label: {
-                        content: `Last: ${data.last_price.toFixed(2)}`,
-                        display: true,
-                        position: 'center',
-                        backgroundColor: 'rgba(100, 100, 100, 0.8)',
-                        font: { style: 'italic' }
-                    }
-                };
+                const labelsAsNumbers = data.labels.map(l => parseFloat(l));
+                let priceIndex = -1;
+
+                // Find the index of the first strike that is greater than the last price
+                const insertionIndex = labelsAsNumbers.findIndex(strike => strike > data.last_price);
+
+                if (insertionIndex === 0) {
+                    priceIndex = 0; // Price is before the first strike
+                } else if (insertionIndex === -1) {
+                    priceIndex = labelsAsNumbers.length; // Price is after the last strike
+                } else {
+                    // Interpolate the position between the two surrounding strikes
+                    const prevStrike = labelsAsNumbers[insertionIndex - 1];
+                    const nextStrike = labelsAsNumbers[insertionIndex];
+                    const relativePosition = (data.last_price - prevStrike) / (nextStrike - prevStrike);
+                    priceIndex = (insertionIndex - 1) + relativePosition;
+                }
+
+                if (priceIndex !== -1) {
+                    annotations.lastPrice = {
+                        type: 'line',
+                        scaleID: 'x',
+                        value: priceIndex, // Use the calculated fractional index
+                        borderColor: 'rgba(255, 255, 255, 0.7)',
+                        borderWidth: 2,
+                        label: {
+                            content: `Last: ${data.last_price.toFixed(2)}`,
+                            display: true,
+                            position: 'center',
+                            backgroundColor: 'rgba(100, 100, 100, 0.8)',
+                            font: { style: 'italic' }
+                        }
+                    };
+                }
             }
 
 
@@ -206,42 +227,13 @@
                 type: 'bar',
                 data: {
                     labels: data.labels,
-                    datasets: [
-                        // --- OI Bars ---
-                        {
-                            label: 'Call OI', data: data.call_oi,
-                            backgroundColor: 'rgba(22, 163, 74, 0.7)',
-                            yAxisID: 'y',
-                            stack: 'calls' // Group for stacking
-                        },
-                        {
-                            label: 'Put OI', data: data.put_oi,
-                            backgroundColor: 'rgba(220, 38, 38, 0.7)',
-                            yAxisID: 'y',
-                            stack: 'puts' // Group for stacking
-                        },
-                        // --- NEW: Volume Bars ---
-                        {
-                            label: 'Call Volume', data: data.call_vol,
-                            backgroundColor: 'rgba(74, 222, 128, 0.7)', // Lighter green
-                            yAxisID: 'y',
-                            stack: 'calls' // Group for stacking
-                        },
-                        {
-                            label: 'Put Volume', data: data.put_vol,
-                            backgroundColor: 'rgba(248, 113, 113, 0.7)', // Lighter red
-                            yAxisID: 'y',
-                            stack: 'puts' // Group for stacking
-                        },
-                        // --- Line charts ---
-                        {
-                            label: 'Cumulative OI', data: data.cumulative_oi, type: 'line',
-                            borderColor: 'rgba(234, 179, 8, 1)', yAxisID: 'y1'
-                        },
-                        {
-                            label: 'Cumulative Volume', data: data.cumulative_vol, type: 'line',
-                            borderColor: 'rgba(59, 130, 246, 1)', hidden: true, yAxisID: 'y1'
-                        }
+                    datasets: [ /* ... Datasets remain the same ... */
+                        { label: 'Call OI', data: data.call_oi, backgroundColor: 'rgba(22, 163, 74, 0.7)', yAxisID: 'y', stack: 'calls' },
+                        { label: 'Put OI', data: data.put_oi, backgroundColor: 'rgba(220, 38, 38, 0.7)', yAxisID: 'y', stack: 'puts' },
+                        { label: 'Call Volume', data: data.call_vol, backgroundColor: 'rgba(74, 222, 128, 0.7)', yAxisID: 'y', stack: 'calls' },
+                        { label: 'Put Volume', data: data.put_vol, backgroundColor: 'rgba(248, 113, 113, 0.7)', yAxisID: 'y', stack: 'puts' },
+                        { label: 'Cumulative OI', data: data.cumulative_oi, type: 'line', borderColor: 'rgba(234, 179, 8, 1)', yAxisID: 'y1' },
+                        { label: 'Cumulative Volume', data: data.cumulative_vol, type: 'line', borderColor: 'rgba(59, 130, 246, 1)', hidden: true, yAxisID: 'y1' }
                     ]
                 },
                 options: {
@@ -253,19 +245,18 @@
                             mode: 'index', intersect: false,
                             callbacks: { label: (c) => `${c.dataset.label}: ${Math.abs(c.parsed.y)}` }
                         },
-                        // --- NEW: Use the annotation object ---
                         annotation: {
                             annotations: annotations
                         }
                     },
-                    scales: {
+                    scales: { /* ... Scales remain the same ... */
                         x: { stacked: true, title: { display: true, text: 'Strike Price', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
                         y: { stacked: true, position: 'left', title: { display: true, text: 'Open Interest & Volume', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
                         y1: { position: 'right', title: { display: true, text: 'Cumulative Contracts', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' }, grid: { drawOnChartArea: false } }
                     }
                 }
             });
-            ctx.canvas.style.height = '600px'; // Increased height for better visibility
+            ctx.canvas.style.height = '600px';
         }
     </script>
 </body>
