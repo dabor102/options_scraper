@@ -173,12 +173,12 @@
             // Prepare annotations for walls
             const annotations = {
                 callWall: {
-                    type: 'line', scaleID: 'x', value: data.call_wall_strike,
+                    type: 'line', scaleID: 'x', value: data.call_wall,
                     borderColor: 'rgba(34, 197, 94, 0.9)', borderWidth: 3, borderDash: [6, 6],
                     label: { content: 'Call Wall', display: true, position: 'start', backgroundColor: 'rgba(22, 163, 74, 0.9)', font: { weight: 'bold' } }
                 },
                 putWall: {
-                    type: 'line', scaleID: 'x', value: data.put_wall_strike,
+                    type: 'line', scaleID: 'x', value: data.put_wall,
                     borderColor: 'rgba(239, 68, 68, 0.9)', borderWidth: 3, borderDash: [6, 6],
                     label: { content: 'Put Wall', display: true, position: 'end', backgroundColor: 'rgba(220, 38, 38, 0.9)', font: { weight: 'bold' } }
                 }
@@ -227,13 +227,14 @@
                 type: 'bar',
                 data: {
                     labels: data.labels,
-                    datasets: [ /* ... Datasets remain the same ... */
-                        { label: 'Call OI', data: data.call_oi, backgroundColor: 'rgba(22, 163, 74, 0.7)', yAxisID: 'y', stack: 'calls' },
+                    datasets: [
+                        { label: 'Call OI', data: data.call_oi, backgroundColor: 'rgba(22, 163, 74, 0.7)', yAxisID: 'y', stack: 'calls' }, 
                         { label: 'Put OI', data: data.put_oi, backgroundColor: 'rgba(220, 38, 38, 0.7)', yAxisID: 'y', stack: 'puts' },
                         { label: 'Call Volume', data: data.call_vol, backgroundColor: 'rgba(74, 222, 128, 0.7)', yAxisID: 'y', stack: 'calls' },
                         { label: 'Put Volume', data: data.put_vol, backgroundColor: 'rgba(248, 113, 113, 0.7)', yAxisID: 'y', stack: 'puts' },
                         { label: 'Cumulative OI', data: data.cumulative_oi, type: 'line', borderColor: 'rgba(234, 179, 8, 1)', yAxisID: 'y1' },
                         { label: 'Cumulative Volume', data: data.cumulative_vol, type: 'line', borderColor: 'rgba(59, 130, 246, 1)', hidden: true, yAxisID: 'y1' }
+
                     ]
                 },
                 options: {
@@ -249,7 +250,7 @@
                             annotations: annotations
                         }
                     },
-                    scales: { /* ... Scales remain the same ... */
+                    scales: { 
                         x: { stacked: true, title: { display: true, text: 'Strike Price', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
                         y: { stacked: true, position: 'left', title: { display: true, text: 'Open Interest & Volume', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' } },
                         y1: { position: 'right', title: { display: true, text: 'Cumulative Contracts', color: '#9CA3AF' }, ticks: { color: '#9CA3AF' }, grid: { drawOnChartArea: false } }
