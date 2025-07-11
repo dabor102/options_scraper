@@ -2,128 +2,147 @@ import json
 from flask import Flask, jsonify
 from flask_cors import CORS
 import pandas as pd
-import requests
+import logging
+import time
+from datetime import datetime
+import os
+import csv
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from pytz import timezone
 
 # Assuming the scraper is in the options_scraper directory
 from options_scraper.scraper import NASDAQOptionsScraper
 
-app = Flask(__name__)
-# This enables CORS, allowing your visualizer.html to make requests to this server
-CORS(app)
+# --- Configuration ---
+LOG = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s :: [%(levelname)s] :: %(message)s")
 
-# Instantiate the scraper once to reuse the session
-scraper = NASDAQOptionsScraper()
+TICKERS_TO_SCRAPE = ["AMD"]
+DATA_STORE_DIR = "data_store"
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 60
+
+# --- Helper Functions for Safe Data Conversion ---
+
+def safe_to_int(value):
+    """Safely converts a value to an integer, returning 0 on failure."""
+    try:
+        return int(str(value).replace(',', ''))
+    except (ValueError, TypeError):
+        return 0
+
+def safe_to_float(value):
+    """Safely converts a value to a float, returning 0.0 on failure."""
+    try:
+        return float(str(value).replace(',', ''))
+    except (ValueError, TypeError):
+        return 0.0
+
+# --- Background Scheduler Functions ---
+
+def scrape_and_save(market_session: str):
+    """
+    Fetches options data for a list of tickers and appends it to a persistent CSV store.
+    """
+    log_prefix = f"[Scheduler - {market_session}]"
+    LOG.info(f"{log_prefix} --- Starting scrape for tickers: {TICKERS_TO_SCRAPE} ---")
+    scraper = NASDAQOptionsScraper()
+    scrape_timestamp = datetime.now()
+
+    for ticker in TICKERS_TO_SCRAPE:
+        LOG.info(f"{log_prefix} Processing {ticker}...")
+        try:
+            expiration_dates = scraper.get_expiration_dates(ticker)
+            if not expiration_dates:
+                LOG.warning(f"{log_prefix} No expiration dates found for {ticker}.")
+                continue
+
+            LOG.info(f"{log_prefix} Found {len(expiration_dates)} expiration dates for {ticker}.")
+            for expiry in expiration_dates:
+                process_single_expiry(scraper, ticker, expiry, scrape_timestamp, market_session, log_prefix)
+        except Exception as e:
+            LOG.error(f"{log_prefix} A critical error occurred while processing {ticker}: {e}")
+
+    LOG.info(f"{log_prefix} --- Completed scrape for all tickers ---")
+
+def process_single_expiry(scraper, ticker, expiry, scrape_timestamp, market_session, log_prefix):
+    """Helper function to scrape and save data for a single expiration date."""
+    ticker_dir = os.path.join(DATA_STORE_DIR, ticker)
+    if not os.path.exists(ticker_dir):
+        os.makedirs(ticker_dir)
+    file_path = os.path.join(ticker_dir, f"{expiry}.csv")
+
+    records = list(scraper(ticker, expiry=expiry))
+    if not records:
+        LOG.warning(f"{log_prefix} No records found for {ticker} on {expiry}.")
+        return
+
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, 'a', newline='') as csv_file:
+        headers = ['timestamp', 'market_session', 'strike', 'type', 'open_interest', 'volume', 'bid', 'ask']
+        writer = csv.DictWriter(csv_file, fieldnames=headers)
+        if not file_exists:
+            writer.writeheader()
+        
+        for record in records:
+            option_type = 'call' if record.get('Calls') else 'put'
+            writer.writerow({
+                'timestamp': scrape_timestamp.isoformat(),
+                'market_session': market_session,
+                'strike': safe_to_float(record.get('Strike')),
+                'type': option_type,
+                'open_interest': safe_to_int(record.get('Open Int')),
+                'volume': safe_to_int(record.get('Vol')),
+                'bid': safe_to_float(record.get('Bid')),
+                'ask': safe_to_float(record.get('Ask')),
+            })
+    LOG.info(f"{log_prefix} Appended {len(records)} records for {ticker} (Expiry: {expiry}) to {file_path}")
+
+# --- Flask App Initialization ---
+app = Flask(__name__)
+CORS(app)
+api_scraper = NASDAQOptionsScraper() # Separate instance for on-demand API calls
+
+# --- UI Data Processing and API Endpoints ---
 
 def preprocess_for_chart(raw_data):
     """
     Aggregates raw options data by strike price for visualization.
-    This function is moved from the visualizer to the backend.
     """
     if not raw_data:
         return {}
-
     df = pd.DataFrame(raw_data)
-
-    # Convert to numeric, coercing errors to NaN, then fill NaN with 0
     for col in ['volume', 'open_interest']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Aggregate data by strike and type
     agg_df = df.groupby(['strike', 'type']).sum().unstack(fill_value=0)
     agg_df.columns = ['_'.join(col).strip() for col in agg_df.columns.values]
-    
-    # Ensure all required columns exist
     for col in ['open_interest_call', 'open_interest_put', 'volume_call', 'volume_put']:
         if col not in agg_df.columns:
             agg_df[col] = 0
-
     agg_df = agg_df.sort_index()
-
-    # --- NEW: Find the Call and Put Walls ---
-    # Find the strike price (index) with the maximum open interest.
-    # Use .get() to avoid errors if a column is all zeros.
-    call_wall_strike = agg_df['open_interest_call'].idxmax() if not agg_df['open_interest_call'].empty else 0
-    put_wall_strike = agg_df['open_interest_put'].idxmax() if not agg_df['open_interest_put'].empty else 0
-    
-    # Calculate cumulative values
     agg_df['cumulative_oi'] = (agg_df['open_interest_call'] + agg_df['open_interest_put']).cumsum()
     agg_df['cumulative_vol'] = (agg_df['volume_call'] + agg_df['volume_put']).cumsum()
-
-    # Prepare data for JSON serialization
     chart_data = {
         'labels': [f"{s:.2f}" for s in agg_df.index.tolist()],
         'call_oi': agg_df['open_interest_call'].tolist(),
-        'put_oi': (-agg_df['open_interest_put']).tolist(), # Negative for chart display
+        'put_oi': (-agg_df['open_interest_put']).tolist(),
         'call_vol': agg_df['volume_call'].tolist(),
-        'put_vol': (-agg_df['volume_put']).tolist(), # Negative for chart display
-        'cumulative_oi': agg_df['cumulative_oi'].tolist(),
-        'cumulative_vol': agg_df['cumulative_vol'].tolist(),
-        # --- NEW: Add walls to the response ---
-        'call_wall_strike': f"{call_wall_strike:.2f}",
-        'put_wall_strike': f"{put_wall_strike:.2f}"
-    }
-    return chart_data
-    """
-    Aggregates raw options data by strike price for visualization.
-    This function is moved from the visualizer to the backend.
-    """
-    if not raw_data:
-        return {}
-
-    df = pd.DataFrame(raw_data)
-
-    # Convert to numeric, coercing errors to NaN, then fill NaN with 0
-    for col in ['volume', 'open_interest']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Aggregate data by strike and type
-    agg_df = df.groupby(['strike', 'type']).sum().unstack(fill_value=0)
-    agg_df.columns = ['_'.join(col).strip() for col in agg_df.columns.values]
-    
-    # Ensure all required columns exist
-    for col in ['open_interest_call', 'open_interest_put', 'volume_call', 'volume_put']:
-        if col not in agg_df.columns:
-            agg_df[col] = 0
-
-    agg_df = agg_df.sort_index()
-
-    # Calculate cumulative values
-    agg_df['cumulative_oi'] = (agg_df['open_interest_call'] + agg_df['open_interest_put']).cumsum()
-    agg_df['cumulative_vol'] = (agg_df['volume_call'] + agg_df['volume_put']).cumsum()
-
-    # Prepare data for JSON serialization
-    chart_data = {
-        'labels': [f"{s:.2f}" for s in agg_df.index.tolist()],
-        'call_oi': agg_df['open_interest_call'].tolist(),
-        'put_oi': (-agg_df['open_interest_put']).tolist(), # Negative for chart display
-        'call_vol': agg_df['volume_call'].tolist(),
-        'put_vol': (-agg_df['volume_put']).tolist(), # Negative for chart display
+        'put_vol': (-agg_df['volume_put']).tolist(),
         'cumulative_oi': agg_df['cumulative_oi'].tolist(),
         'cumulative_vol': agg_df['cumulative_vol'].tolist(),
     }
     return chart_data
-
 
 @app.route('/api/expirations/<string:ticker>', methods=['GET'])
 def get_expirations(ticker):
     """API endpoint to fetch available expiration dates for a ticker."""
     if not ticker:
         return jsonify({"error": "Ticker symbol is required."}), 400
-    
-    dates = scraper.get_expiration_dates(ticker)
+    dates = api_scraper.get_expiration_dates(ticker)
     if dates is None:
         return jsonify({"error": "Failed to fetch expiration dates from NASDAQ."}), 500
-        
     return jsonify(dates)
-
-
-def to_int(value):
-    """Safely converts a string to an int, handling '--' and commas."""
-    if value is None or value == '--':
-        return 0
-    return int(str(value).replace(',', ''))
-
 
 @app.route('/api/chart_data/<string:ticker>/<string:expiry>', methods=['GET'])
 def get_chart_data(ticker, expiry):
@@ -131,39 +150,41 @@ def get_chart_data(ticker, expiry):
     if not ticker or not expiry:
         return jsonify({"error": "Ticker and expiry date are required."}), 400
     
-    stock_info = scraper.get_stock_info(ticker)
-    last_price = stock_info.get('last_price') if stock_info else None
-    
     raw_data = []
-    # The scraper yields records; some may have '--' for volume or open interest.
-    for record in scraper(ticker, expiry=expiry):
-        # We now use our safe to_int() converter here.
+    # Parse the detailed records from the scraper into the simple format needed for the chart
+    for record in api_scraper(ticker, expiry=expiry):
         if record.get('Calls'):
             raw_data.append({
                 'type': 'call',
-                'strike': float(record.get('Strike')),
-                'volume': to_int(record.get('Vol')),
-                'open_interest': to_int(record.get('Open Int'))
+                'strike': safe_to_float(record.get('Strike')),
+                'volume': safe_to_int(record.get('Vol')),
+                'open_interest': safe_to_int(record.get('Open Int'))
             })
         elif record.get('Puts'):
              raw_data.append({
                 'type': 'put',
-                'strike': float(record.get('Strike')),
-                'volume': to_int(record.get('Vol')),
-                'open_interest': to_int(record.get('Open Int'))
+                'strike': safe_to_float(record.get('Strike')),
+                'volume': safe_to_int(record.get('Vol')),
+                'open_interest': safe_to_int(record.get('Open Int'))
             })
 
     if not raw_data:
         return jsonify({"error": "No data found for the selected criteria."}), 404
         
     processed_data = preprocess_for_chart(raw_data)
-
-    if last_price:
-        processed_data['last_price'] = last_price
-
     return jsonify(processed_data)
 
-
+# --- Main Execution ---
 if __name__ == '__main__':
-    # Runs the server on http://127.0.0.1:5000
-    app.run(debug=True, port=5000)
+    # Initialize and start the scheduler
+    scheduler = BackgroundScheduler(timezone=timezone('US/Eastern'))
+    scheduler.add_job(scrape_and_save, 'cron', day_of_week='mon-fri', hour=9, minute=50, args=['pre_market'])
+    scheduler.add_job(scrape_and_save, 'cron', day_of_week='mon-fri', hour=16, minute=0, args=['post_market'])
+    scheduler.start()
+    LOG.info("Background scheduler started. Scraping will run at 9:50 AM and 4:00 PM EST on weekdays.")
+    
+    # You can uncomment the line below to run a scrape immediately for testing
+    # scrape_and_save('manual_test_run')
+
+    # Run the Flask server, use_reloader=False is important to prevent the scheduler from running twice
+    app.run(debug=True, use_reloader=False, port=5000)
