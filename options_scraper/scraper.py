@@ -1,3 +1,4 @@
+#scraper.py
 import logging
 import requests
 import itertools
@@ -29,24 +30,39 @@ class NASDAQOptionsScraper:
     # In options_scraper/scraper.py, inside the NASDAQOptionsScraper class
 
     def get_stock_info(self, ticker: str):
-        """Fetches summary data for a given stock ticker, including the last price."""
-        LOG.info(f"Fetching stock info for {ticker.upper()}...")
-        # This endpoint provides summary details for the ticker.
+        """Fetches summary data for a given stock ticker, with detailed logging."""
+        LOG.info(f"--- Running get_stock_info for {ticker.upper()} ---")
         url = f"{self.base_url}{ticker}/info?assetclass=stocks"
+        LOG.info(f"Requesting stock info from URL: {url}")
         try:
             response = self.session.get(url, timeout=10)
+            LOG.info(f"Received response with status code: {response.status_code}")
             response.raise_for_status()
-            data = response.json()
-            # The primary quote is usually found in this part of the response.
-            primary_data = data.get('data', {}).get('primaryData', {})
+            
+            raw_data = response.json()
+            main_data = raw_data.get('data', raw_data)
+            
+            if not main_data:
+                LOG.error("After handling API structure, the main_data object is empty.")
+                return None
+
+            primary_data = main_data.get('primaryData', {})
             if primary_data and primary_data.get('lastSalePrice'):
-                return {
-                    "last_price": float(primary_data['lastSalePrice'].replace('$', ''))
-                }
+                price_str = primary_data['lastSalePrice']
+                LOG.info(f"Successfully found lastSalePrice: {price_str}")
+                return {"last_price": float(price_str.replace('$', ''))}
+
+            LOG.warning(f"Could not find 'lastSalePrice' in the response for {ticker}.")
+            LOG.info(f"Dumping main_data object for debugging: {json.dumps(main_data, indent=2)}")
             return None
+            
         except requests.exceptions.RequestException as e:
             LOG.error(f"Failed to fetch stock info for {ticker}: {e}")
             return None
+        except json.JSONDecodeError:
+            LOG.error(f"Failed to decode JSON for stock info. Raw response was: {response.text}")
+            return None
+
 
     def get_filter_options(self, ticker: str):
         url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
@@ -83,57 +99,62 @@ class NASDAQOptionsScraper:
                 return None
 
     def get_expiration_dates(self, ticker: str):
-        """
-        Fetches the comprehensive list of available expiration dates by querying
-        for all options within a wide future date range.
-        """
-        LOG.info(f"Fetching all expiration dates for {ticker.upper()} using date range scan...")
-
-        start_date = datetime.date.today()
-        end_date = start_date + datetime.timedelta(days=730)
-
-        params = {
-            'assetclass': 'stocks',
-            'fromdate': start_date.strftime('%Y-%m-%d'),
-            'todate': end_date.strftime('%Y-%m-%d'),
-            'excode': 'oprac',
-            'callput': 'callput',
-            'money': 'all',
-            'type': 'all'
-        }
-
-        url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+        """Fetches expiration dates, with detailed step-by-step logging."""
+        LOG.info(f"--- Running get_expiration_dates for {ticker.upper()} ---")
+        url = f"{self.base_url}{ticker}/option-chain?assetclass=stocks"
+        LOG.info(f"Requesting expiration dates from URL: {url}")
         
         try:
             response = self.session.get(url, timeout=15)
+            LOG.info(f"Received response with status code: {response.status_code}")
             response.raise_for_status()
-            data = response.json()
-            
-            rows = data.get('data', {}).get('table', {}).get('rows', [])
-            if not rows:
-                LOG.warning(f"API returned no option data for the date range for {ticker}.")
-                return self._get_fallback_expiration_dates(ticker)
 
-            # --- THE FIX ---
-            # Add a check to ensure the value of 'expiryDate' is not None.
-            all_date_strs = {row['expiryDate'] for row in rows if 'expiryDate' in row and row['expiryDate'] is not None}
-
-            formatted_dates = set()
-            for d_str in all_date_strs:
-                parsed = self._parse_date(d_str)
-                if parsed is not None:
-                    formatted_dates.add(parsed)
-            
-            if not formatted_dates:
-                LOG.error(f"Could not parse any valid expiration dates from the API response for {ticker}.")
+            raw_text = response.text
+            if not raw_text:
+                LOG.error("API response body for expiration dates is empty.")
                 return []
             
-            LOG.info(f"Successfully found {len(formatted_dates)} unique expiration dates.")
-            return sorted(list(formatted_dates))
+            LOG.info("API response received, attempting to parse JSON...")
+            raw_data = response.json()
 
-        except requests.exceptions.RequestException as e:
-            LOG.error(f"Failed to fetch expiration dates for {ticker}: {e}")
+            main_data = raw_data.get('data', raw_data)
+            if not main_data:
+                LOG.error("After handling API structure, the main_data object for expirations is empty.")
+                LOG.info(f"Original JSON was: {json.dumps(raw_data, indent=2)}")
+                return []
+
+            filter_list = main_data.get('filterlist', {})
+            if not filter_list:
+                LOG.error("Could not find 'filterlist' in the main data object.")
+                LOG.info(f"The main_data object was: {json.dumps(main_data, indent=2)}")
+                return []
+            LOG.info("'filterlist' was found successfully.")
+
+            dates_raw = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
+            if not dates_raw:
+                LOG.warning("The 'filterlist' exists but contains no expiration dates.")
+                return []
+            
+            all_dates = {d.split('|')[0] for d in dates_raw if '|' in d}
+            LOG.info(f"Successfully parsed {len(all_dates)} unique expiration dates.")
+            return sorted(list(all_dates))
+
+        except requests.exceptions.HTTPError as e:
+            LOG.error(f"HTTP Error for {ticker}: {e}")
+            LOG.error(f"Response Body: {response.text}")
             return []
+        except requests.exceptions.RequestException as e:
+            LOG.error(f"A network error occurred for {ticker}: {e}")
+            return []
+        except json.JSONDecodeError:
+            LOG.error(f"Failed to decode JSON for {ticker}. Raw response text was:")
+            LOG.error(response.text)
+            return []
+            
+    # Note: The __call__ and parse_json_records methods rely on fetching the option chain
+    # for a *specific date*, and those responses appear to be consistent. 
+    # Therefore, no changes are needed there. The issue is with the initial metadata calls.
+    # We will update the options chain endpoint in server.py instead for completeness.
 
             
     # Make sure you have the fallback function from before as well
@@ -188,71 +209,55 @@ class NASDAQOptionsScraper:
 
     def __call__(self, ticker, expiry=None, **kwargs):
         """
-        Main method to scrape options data.
-        If 'expiry' is provided, fetches data only for that date.
-        Otherwise, it fetches for all available dates.
+        Main method to scrape options data. Makes a single, comprehensive request
+        for the specified expiration date.
         """
-        LOG.info(f"Fetching available filters for {ticker.upper()}...")
-        filter_list = self.get_filter_options(ticker)
-        if not filter_list:
-            LOG.error("Could not retrieve filter list. Aborting.")
+        if not expiry:
+            LOG.error("An expiration date must be provided to fetch the options chain.")
             return
 
-        # --- UPDATED: Logic to handle a single expiry date ---
-        if expiry:
-            LOG.info(f"Fetching on-demand for single expiration: {expiry}")
-            # Format the single date to match the API's 'from|to' requirement
-            dates = [f'{expiry}|{expiry}']
+        LOG.info(f"Fetching all options for {ticker.upper()} on {expiry} in a single request.")
+
+        # The cache filename will be simple: just the ticker and the expiry date.
+        cache_filename = f"{ticker}_{expiry}_all.json"
+        cache_filepath = os.path.join(self.cache_dir, cache_filename)
+
+        if os.path.exists(cache_filepath):
+            LOG.info(f"Cache HIT for {ticker} on {expiry}. Loading from file.")
+            with open(cache_filepath, 'r') as f:
+                json_data = json.load(f)
         else:
-            # Fallback to fetching all dates if no specific expiry is given
-            dates = [f['value'] for f in filter_list.get('fromdate', {}).get('filter', [])]
-
-        types = [f['value'] for f in filter_list.get('type', {}).get('filter', [])]
-        moneyness = [f['value'] for f in filter_list.get('money', {}).get('filter', [])]
-        
-        combinations = list(itertools.product(dates, types, moneyness))
-        total_combos = len(combinations)
-        LOG.info(f"Found {total_combos} filter combinations to process.")
-
-        for i, combo in enumerate(combinations):
-            date_range, type_val, money_val = combo
+            LOG.info(f"Cache MISS for {ticker} on {expiry}. Fetching from API.")
+            
+            # These parameters ask for ALL options: calls and puts, all strike prices.
+            params = {
+                'assetclass': 'stocks',
+                'fromdate': expiry,
+                'todate': expiry,
+                'excode': 'oprac',
+                'callput': 'callput',
+                'money': 'all',
+                'type': 'all',
+                'limit': 10000  # A high limit to get all strikes
+            }
+            full_url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
             
             try:
-                from_date, to_date = date_range.split('|')
-            except ValueError:
-                LOG.warning(f"Skipping invalid date range: {date_range}")
-                continue
-
-            cache_filename = f"{ticker}_{from_date}_{to_date}_{type_val}_{money_val}.json"
-            cache_filepath = os.path.join(self.cache_dir, cache_filename)
-
-            if os.path.exists(cache_filepath):
-                LOG.info(f"Cache HIT for combo {i+1}/{total_combos}. Loading from file.")
-                with open(cache_filepath, 'r') as f:
-                    json_data = json.load(f)
-            else:
-                LOG.info(f"Cache MISS for combo {i+1}/{total_combos}. Fetching from API.")
-                params = {
-                    'assetclass': 'stocks', 'fromdate': from_date, 'todate': to_date,
-                    'type': type_val, 'money': money_val, 'limit': 10000
-                }
-                full_url = f"{self.base_url}{ticker}/option-chain?{urlencode(params)}"
+                response = self.session.get(full_url, timeout=20)
+                response.raise_for_status()
+                json_data = response.json()
                 
-                try:
-                    response = self.session.get(full_url, timeout=20)
-                    response.raise_for_status()
-                    json_data = response.json()
-                    
-                    with open(cache_filepath, 'w') as f:
-                        json.dump(json_data, f)
-                    
-                    time.sleep(1) 
-                except requests.exceptions.RequestException as e:
-                    LOG.error(f"Failed to scrape URL {full_url}: {e}")
-                    continue
-            
-            for record in self.parse_json_records(json_data, ticker):
-                yield record
+                # Save the complete data to the cache for next time
+                with open(cache_filepath, 'w') as f:
+                    json.dump(json_data, f)
+                
+            except requests.exceptions.RequestException as e:
+                LOG.error(f"Failed to scrape URL {full_url}: {e}")
+                return # Stop execution if the API call fails
+        
+        # Once data is fetched (from cache or API), parse and yield the records.
+        for record in self.parse_json_records(json_data, ticker):
+            yield record
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format="%(asctime)s :: [%(levelname)s] :: %(message)s")

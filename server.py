@@ -1,27 +1,26 @@
+#server.py
 import json
 from flask import Flask, jsonify
 from flask_cors import CORS
-import pandas as pd
 import logging
-import time
 from datetime import datetime
-import os
-import csv
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from pytz import timezone
+import yfinance as yf
+from py_vollib.black_scholes.implied_volatility import implied_volatility as iv
+from py_vollib.black_scholes.greeks.analytical import delta as calculate_delta, gamma as calculate_gamma
 
 from options_scraper.scraper import NASDAQOptionsScraper
+
 
 # --- Configuration ---
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s :: [%(levelname)s] :: %(message)s")
 
-TICKERS_TO_SCRAPE = ["AMD"]
-DATA_STORE_DIR = "data_store"
+# --- Flask App Initialization ---
+app = Flask(__name__)
+CORS(app)
+api_scraper = NASDAQOptionsScraper() # Instance for on-demand API calls
 
 # --- Helper Functions for Safe Data Conversion ---
-
 def safe_to_int(value):
     """Safely converts a value to an integer, returning 0 on failure."""
     try:
@@ -35,159 +34,123 @@ def safe_to_float(value):
         return float(str(value).replace(',', ''))
     except (ValueError, TypeError):
         return 0.0
+    
 
-# --- Background Scheduler Functions ---
+# --- Helper Function to get risk free rate ---
 
-def scrape_and_save(market_session: str):
+def get_risk_free_rate(time_to_expiration):
     """
-    Fetches options data for a list of tickers and appends it to a persistent CSV store.
+    Fetches an appropriate risk-free rate from yfinance.
+    - Uses 13-Week Treasury Bill (^IRX) for options expiring in < 1 year.
+    - Uses 10-Year Treasury Note (^TNX) for options expiring in >= 1 year.
     """
-    log_prefix = f"[Scheduler - {market_session}]"
-    LOG.info(f"{log_prefix} --- Starting scrape for tickers: {TICKERS_TO_SCRAPE} ---")
-    scraper = NASDAQOptionsScraper()
-    scrape_timestamp = datetime.now()
-
-    for ticker in TICKERS_TO_SCRAPE:
-        LOG.info(f"{log_prefix} Processing {ticker}...")
-        # We handle errors for individual dates inside process_single_expiry,
-        # so this outer try/except is for more general network/API failures.
-        try:
-            expiration_dates = scraper.get_expiration_dates(ticker)
-            if not expiration_dates:
-                LOG.warning(f"{log_prefix} No expiration dates found for {ticker}.")
-                continue
-
-            LOG.info(f"{log_prefix} Found {len(expiration_dates)} expiration dates for {ticker}.")
-            for expiry in expiration_dates:
-                # The core logic is now handled in the helper function
-                process_single_expiry(scraper, ticker, expiry, scrape_timestamp, market_session, log_prefix)
-        
-        except Exception as e:
-            # This will catch broader issues, like failing to get the expiration dates list
-            LOG.error(f"{log_prefix} A critical error occurred while processing {ticker}: {e}")
-
-    LOG.info(f"{log_prefix} --- Completed scrape for all tickers ---")
-
-
-def process_single_expiry(scraper, ticker, expiry, scrape_timestamp, market_session, log_prefix):
-    """
-    Helper function to scrape and save data for a single expiration date.
-    This function now contains its own error handling.
-    """
-    ticker_dir = os.path.join(DATA_STORE_DIR, ticker)
-    if not os.path.exists(ticker_dir):
-        os.makedirs(ticker_dir)
-    file_path = os.path.join(ticker_dir, f"{expiry}.csv")
-
+    # Choose the ticker based on the option's duration
+    if time_to_expiration < 1.0:
+        rate_ticker = "^IRX"
+        rate_name = "13-Week Treasury Bill"
+    else:
+        rate_ticker = "^TNX"
+        rate_name = "10-Year Treasury Note"
+    
     try:
-        # --- THIS IS THE KEY CHANGE ---
-        # The call to the scraper is now wrapped in a try/except block.
-        records = list(scraper(ticker, expiry=expiry))
-        if not records:
-            LOG.warning(f"{log_prefix} No records found for {ticker} on {expiry}.")
-            return
-            
-    except TypeError:
-        # This specifically catches the 'NoneType' is not iterable error.
-        LOG.error(f"{log_prefix} Corrupted data returned from API for {ticker} (Expiry: {expiry}). Skipping this date.")
-        return # Exit this function for this date and allow the main loop to continue
+        ticker_obj = yf.Ticker(rate_ticker)
+        hist = ticker_obj.history(period="5d")
+        if not hist.empty:
+            rate = hist['Close'].iloc[-1] / 100
+            LOG.info(f"Using {rate_name} for risk-free rate: {rate:.4f}")
+            return rate
+    except Exception as e:
+        LOG.warning(f"Could not fetch live rate for {rate_ticker}: {e}. Falling back.")
+    
+    return 0.045 # Fallback to a default value
 
-    file_exists = os.path.isfile(file_path)
-    with open(file_path, 'a', newline='') as csv_file:
-        # ... (the rest of the file writing logic remains the same)
-        headers = ['timestamp', 'market_session', 'strike', 'type', 'open_interest', 'volume', 'bid', 'ask']
-        writer = csv.DictWriter(csv_file, fieldnames=headers)
-        if not file_exists:
-            writer.writeheader()
-        
-        for record in records:
-            option_type = 'call' if record.get('Calls') else 'put'
-            writer.writerow({
-                'timestamp': scrape_timestamp.isoformat(),
-                'market_session': market_session,
-                'strike': safe_to_float(record.get('Strike')),
-                'type': option_type,
-                'open_interest': safe_to_int(record.get('Open Int')),
-                'volume': safe_to_int(record.get('Vol')),
-                'bid': safe_to_float(record.get('Bid')),
-                'ask': safe_to_float(record.get('Ask')),
-            })
-            
-    LOG.info(f"{log_prefix} Appended {len(records)} records for {ticker} (Expiry: {expiry})")
-
-
-# --- Flask App Initialization ---
-app = Flask(__name__)
-CORS(app)
-api_scraper = NASDAQOptionsScraper() # Instance for on-demand API calls
-
-# --- UI Data Processing and API Endpoints ---
-
-def preprocess_for_chart(raw_data, last_price=None):
-    """Aggregates raw options data and calculates walls for visualization."""
-    if not raw_data: return {}
-    df = pd.DataFrame(raw_data)
-    for col in ['volume', 'open_interest']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    agg_df = df.groupby(['strike', 'type']).sum().unstack(fill_value=0)
-    agg_df.columns = ['_'.join(col).strip() for col in agg_df.columns.values]
-    for col in ['open_interest_call', 'open_interest_put', 'volume_call', 'volume_put']:
-        if col not in agg_df.columns:
-            agg_df[col] = 0
-    agg_df = agg_df.sort_index()
-    call_wall_strike = agg_df['open_interest_call'].idxmax() if not agg_df['open_interest_call'].empty else 0
-    put_wall_strike = agg_df['open_interest_put'].idxmax() if not agg_df['open_interest_put'].empty else 0
-    agg_df['cumulative_oi'] = (agg_df['open_interest_call'] + agg_df['open_interest_put']).cumsum()
-    agg_df['cumulative_vol'] = (agg_df['volume_call'] + agg_df['volume_put']).cumsum()
-    return {
-        'labels': [f"{s:.2f}" for s in agg_df.index.tolist()],
-        'call_oi': agg_df['open_interest_call'].tolist(),
-        'put_oi': (-agg_df['open_interest_put']).tolist(),
-        'call_vol': agg_df['volume_call'].tolist(),
-        'put_vol': (-agg_df['volume_put']).tolist(),
-        'cumulative_oi': agg_df['cumulative_oi'].tolist(),
-        'cumulative_vol': agg_df['cumulative_vol'].tolist(),
-        'last_price': last_price, 'call_wall_strike': call_wall_strike, 'put_wall_strike': put_wall_strike,
-    }
+# --- API Endpoints ---
 
 @app.route('/api/expirations/<string:ticker>', methods=['GET'])
 def get_expirations(ticker):
     """API endpoint to fetch available expiration dates for a ticker."""
+    LOG.info(f"--- Endpoint /api/expirations/{ticker} HIT ---") # <-- ADD THIS LINE
     if not ticker:
         return jsonify({"error": "Ticker symbol is required."}), 400
-    dates = api_scraper.get_expiration_dates(ticker)
-    if dates is None:
-        return jsonify({"error": "Failed to fetch expiration dates from NASDAQ."}), 500
-    return jsonify(dates)
+    try:
+        dates = api_scraper.get_expiration_dates(ticker)
+        if dates is None:
+            return jsonify({"error": "Failed to fetch expiration dates from NASDAQ."}), 500
+        return jsonify(dates)
+    except Exception as e:
+        LOG.error(f"Error fetching expirations for {ticker}: {e}")
+        return jsonify({"error": "An internal error occurred."}), 500
 
-@app.route('/api/chart_data/<string:ticker>/<string:expiry>', methods=['GET'])
-def get_chart_data(ticker, expiry):
-    """API endpoint to fetch and process options data for the chart."""
+@app.route('/api/stock_info/<string:ticker>', methods=['GET'])
+def get_stock_price(ticker):
+    """API endpoint to fetch the last price for a ticker."""
+    if not ticker:
+        return jsonify({"error": "Ticker symbol is required."}), 400
+    try:
+        stock_info = api_scraper.get_stock_info(ticker)
+        if not stock_info or 'last_price' not in stock_info:
+             return jsonify({"error": "Failed to fetch stock info from NASDAQ."}), 500
+        return jsonify({"last_price": stock_info['last_price']})
+    except Exception as e:
+        LOG.error(f"Error fetching stock info for {ticker}: {e}")
+        return jsonify({"error": "An internal error occurred."}), 500
+
+@app.route('/api/options_chain/<string:ticker>/<string:expiry>', methods=['GET'])
+def get_options_chain(ticker, expiry):
+    """
+    API endpoint to fetch the full options chain, calculate Implied Volatility,
+    Delta, Gamma, and return the formatted data.
+    """
     if not ticker or not expiry:
         return jsonify({"error": "Ticker and expiry date are required."}), 400
+
+    try:
+        LOG.info(f"Fetching chain for {ticker} expiring on {expiry}.")
+        records = list(api_scraper(ticker, expiry=expiry))
+        stock_info = api_scraper.get_stock_info(ticker)
+
+        if not records or not stock_info:
+            return jsonify({"error": "No data found for the selected criteria."}), 404
+
+        S = stock_info['last_price']
+        expiry_date = datetime.strptime(expiry, '%Y-%m-%d')
+        time_to_expiration = (expiry_date - datetime.utcnow()).days / 365.0
+        if time_to_expiration <= 0: time_to_expiration = 0.00001
+        r = get_risk_free_rate(time_to_expiration)
+
+        calls_data, puts_data = [], []
+
+        for record in records:
+            bid, ask = safe_to_float(record.get('Bid')), safe_to_float(record.get('Ask'))
+            if bid <= 0 or ask <= 0: continue
+
+            market_price = (bid + ask) / 2
+            K = safe_to_float(record.get('Strike'))
+            option_type_flag = 'p' if record.get('Puts') is not None else 'c'
+            
+            calculated_iv, delta, gamma = 0.0, 0.0, 0.0
+            try:
+                calculated_iv = iv(market_price, S, K, time_to_expiration, r, option_type_flag)
+                delta = calculate_delta(option_type_flag, S, K, time_to_expiration, r, calculated_iv)
+                gamma = calculate_gamma(option_type_flag, S, K, time_to_expiration, r, calculated_iv)
+            except Exception: pass
+            
+            option_data = {
+                'strike': K, 'lastPrice': safe_to_float(record.get('Last')),
+                'bid': bid, 'ask': ask, 'volume': safe_to_int(record.get('Vol')),
+                'openInterest': safe_to_int(record.get('Open Int')),
+                'impliedVolatility': calculated_iv, 'delta': delta, 'gamma': gamma
+            }
+
+            if option_type_flag == 'c': calls_data.append(option_data)
+            else: puts_data.append(option_data)
+
+        return jsonify({"calls": calls_data, "puts": puts_data})
+
+    except Exception as e:
+        LOG.error(f"Unexpected error in get_options_chain for {ticker}/{expiry}: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred."}), 500
     
-    stock_info = api_scraper.get_stock_info(ticker)
-    last_price = stock_info.get('last_price') if stock_info else None
-
-    raw_data = []
-    for record in api_scraper(ticker, expiry=expiry):
-        if record.get('Calls'):
-            raw_data.append({'type': 'call', 'strike': safe_to_float(record.get('Strike')), 'volume': safe_to_int(record.get('Vol')), 'open_interest': safe_to_int(record.get('Open Int'))})
-        elif record.get('Puts'):
-             raw_data.append({'type': 'put', 'strike': safe_to_float(record.get('Strike')), 'volume': safe_to_int(record.get('Vol')), 'open_interest': safe_to_int(record.get('Open Int'))})
-
-    if not raw_data:
-        return jsonify({"error": "No data found for the selected criteria."}), 404
-        
-    processed_data = preprocess_for_chart(raw_data, last_price=last_price)
-    return jsonify(processed_data)
-
 # --- Main Execution ---
 if __name__ == '__main__':
-    scheduler = BackgroundScheduler(timezone=timezone('US/Eastern'))
-    scheduler.add_job(scrape_and_save, 'cron', day_of_week='mon-fri', hour=9, minute=30, args=['pre_market'])
-    scheduler.add_job(scrape_and_save, 'cron', day_of_week='mon-fri', hour=16, minute=0, args=['post_market'])
-    scheduler.start()
-    LOG.info("Background scheduler started.")
-    
     app.run(debug=True, use_reloader=False, port=5000)
